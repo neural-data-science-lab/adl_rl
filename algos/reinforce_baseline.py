@@ -47,26 +47,16 @@ class Args:
     """Toggle learning rate annealing for policy and value networks"""
     gamma: float = 0.99
     """the discount factor gamma"""
-    gae_lambda: float = 0.95
-    """the lambda for the general advantage estimation"""
+    gae_lambda: float = 1.
+    """the lambda for the general advantage estimation (should be 1. for REINFORCE)"""
     num_minibatches: int = 32
     """the number of mini-batches"""
     update_epochs: int = 10
     """the K epochs to update the policy"""
-    norm_adv: bool = True
-    """Toggles advantages normalization"""
-    clip_coef: float = 0.2
-    """the policy gradient loss clipping coefficient"""
-    clip_value_loss: bool = True
-    """Toggles whether or not to use a clipped loss for the value function, as per the paper."""
-    entropy_coef: float = 0.0
-    """coefficient of the entropy loss"""
     value_coef: float = 0.5
     """coefficient of the value function loss"""
     max_grad_norm: float = 0.5
     """the maximum norm for the gradient clipping"""
-    target_kl: Optional[float] = 0.02
-    """the target KL divergence threshold"""
 
     # to be filled in runtime
     batch_size: int = 0
@@ -276,46 +266,19 @@ if __name__ == "__main__":
                 logratio = newlogprob - log_probs_minibatch
                 ratio = logratio.exp()
 
-                with torch.no_grad():
-                    # calculate approx_kl http://joschu.net/blog/kl-approx.html
-                    old_approx_kl = (-logratio).mean()
-                    approx_kl = ((ratio - 1) - logratio).mean()
-                    clip_fractions += [((ratio - 1.0).abs() > args.clip_coef).float().mean().item()]
-
-                mb_advantages = advantages_minibatch
-                if args.norm_adv:
-                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
-
                 # Policy loss
-                pg_loss1 = -mb_advantages * ratio
-                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
-                pg_loss = torch.max(pg_loss1, pg_loss2).mean()
+                pg_loss = (-returns_minibatch * ratio).mean()
 
                 # Value loss
                 newvalue = newvalue.view(-1)
-                if args.clip_value_loss:
-                    v_loss_unclipped = (newvalue - returns_minibatch) ** 2
-                    v_clipped = values_minibatch + torch.clamp(
-                        newvalue - values_minibatch,
-                        -args.clip_coef,
-                        args.clip_coef,
-                    )
-                    v_loss_clipped = (v_clipped - returns_minibatch) ** 2
-                    v_loss_max = torch.max(v_loss_unclipped, v_loss_clipped)
-                    v_loss = 0.5 * v_loss_max.mean()
-                else:
-                    v_loss = 0.5 * ((newvalue - returns_minibatch) ** 2).mean()
+                v_loss = 0.5 * ((newvalue - returns_minibatch) ** 2).mean()
 
-                entropy_loss = entropy.mean()
-                loss = pg_loss - args.entropy_coef * entropy_loss + v_loss * args.value_coef
+                loss = pg_loss + v_loss * args.value_coef
 
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
                 optimizer.step()
-
-            if args.target_kl is not None and approx_kl > args.target_kl:
-                break
 
         y_pred, y_true = buffer.values.cpu().numpy(), buffer.returns.cpu().numpy()
         var_y = np.var(y_true)
@@ -324,9 +287,6 @@ if __name__ == "__main__":
         writer.add_scalar("train/learning_rate", optimizer.param_groups[0]["lr"], global_step)
         writer.add_scalar("train/value_loss", v_loss.item(), global_step)
         writer.add_scalar("train/policy_loss", loss.item(), global_step)
-        writer.add_scalar("train/entropy", entropy_loss.item(), global_step)
-        writer.add_scalar("train/old_approx_kl", old_approx_kl.item(), global_step)
-        writer.add_scalar("train/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("train/clip_fraction", np.mean(clip_fractions), global_step)
         writer.add_scalar("train/explained_variance", explained_var, global_step)
         writer.add_scalar("train/steps_per_second", int(global_step / (time.time() - start_time)), global_step)
